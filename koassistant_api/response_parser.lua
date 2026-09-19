@@ -312,6 +312,33 @@ end
 -- Response format transformers for each provider
 -- Returns: success, content, reasoning (reasoning is optional third return value)
 local RESPONSE_TRANSFORMERS = {
+    bedrock = function(response)
+        if response.error then
+            return false, response.error.message or response.error.type or "Unknown error"
+        end
+        local message = response.output and response.output.message
+        if not message or type(message.content) ~= "table" then
+            return false, "Unexpected response format"
+        end
+        local text, reasoning = {}, {}
+        for _, block in ipairs(message.content) do
+            if type(block.text) == "string" then
+                text[#text + 1] = block.text
+            elseif block.reasoningContent and block.reasoningContent.reasoningText
+                    and type(block.reasoningContent.reasoningText.text) == "string" then
+                reasoning[#reasoning + 1] = block.reasoningContent.reasoningText.text
+            end
+        end
+        local content = table.concat(text)
+        if content == "" then return false, "Unexpected response format" end
+        if response.stopReason == "max_tokens" then
+            content = content .. ResponseParser.TRUNCATION_NOTICE
+        else
+            content = ResponseParser.withStopNotice(content, response.stopReason)
+        end
+        return true, content, #reasoning > 0 and table.concat(reasoning) or nil
+    end,
+
     anthropic = function(response)
         if response.type == "error" and response.error then
             return false, response.error.message
