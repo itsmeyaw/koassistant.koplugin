@@ -320,6 +320,27 @@ local RESPONSE_TRANSFORMERS = {
         if not message or type(message.content) ~= "table" then
             return false, "Unexpected response format"
         end
+        local tool_uses = {}
+        for _, block in ipairs(message.content) do
+            local tool_use = type(block) == "table" and block.toolUse
+            if type(tool_use) == "table" and type(tool_use.name) == "string" then
+                table.insert(tool_uses, {
+                    id = tool_use.toolUseId,
+                    name = tool_use.name,
+                    args = type(tool_use.input) == "table" and tool_use.input or {},
+                })
+            end
+        end
+        if #tool_uses > 0 then
+            return true, {
+                _tool_calls = true,
+                calls = tool_uses,
+                raw_assistant_turn = {
+                    role = message.role or "assistant",
+                    content = message.content,
+                },
+            }
+        end
         local text, reasoning = {}, {}
         for _, block in ipairs(message.content) do
             if type(block.text) == "string" then

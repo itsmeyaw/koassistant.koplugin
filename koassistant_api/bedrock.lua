@@ -19,6 +19,10 @@ local function hasText(msg)
     return msg and type(msg.content) == "string" and msg.content:match("%S") ~= nil
 end
 
+local function hasBlocks(msg)
+    return msg and type(msg.content) == "table" and #msg.content > 0
+end
+
 function Handler:getModelsUrl(runtime_url)
     local control_url = runtime_url:gsub("bedrock%-runtime%.", "bedrock."):gsub("/$", "")
     return control_url .. "/foundation-models?byOutputModality=TEXT&byInferenceType=ON_DEMAND"
@@ -45,12 +49,33 @@ function Handler:buildRequestBody(message_history, config)
     end
 
     for _, msg in ipairs(message_history) do
-        if msg.role ~= "system" and hasText(msg) then
+        if msg.role ~= "system" and (hasText(msg) or hasBlocks(msg)) then
             table.insert(request_body.messages, {
                 role = msg.role == "assistant" and "assistant" or "user",
-                content = { { text = msg.content } },
+                content = hasBlocks(msg) and msg.content or { { text = msg.content } },
             })
         end
+    end
+
+    if config.tools and type(config.tools.specs) == "table" and #config.tools.specs > 0 then
+        local tools = {}
+        for _, spec in ipairs(config.tools.specs) do
+            table.insert(tools, {
+                toolSpec = {
+                    name = spec.name,
+                    description = spec.description,
+                    inputSchema = { json = spec.parameters },
+                },
+            })
+        end
+        request_body.toolConfig = { tools = tools }
+        if config.tools.mode == "ANY" then
+            request_body.toolConfig.toolChoice = { any = {} }
+        elseif config.tools.mode == "AUTO" then
+            request_body.toolConfig.toolChoice = { auto = {} }
+        end
+        -- ponytail: Converse has no "none" tool choice; final-pass instructions
+        -- prevent extra calls. Use it if Bedrock adds a native equivalent.
     end
 
     local base_url = (config.base_url or defaults.base_url):gsub("/$", "")
