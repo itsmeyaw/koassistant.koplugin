@@ -1424,16 +1424,29 @@ end
 function BackupManager:restoreBackup(backup_path, options)
     options = options or {}
 
-    -- Acquire lock to prevent concurrent operations
-    local lock_acquired, lock_err = self:_acquireLock()
-    if not lock_acquired then
-        return { success = false, error = lock_err }
+    -- Acquire lock to prevent concurrent operations.
+    -- options.skip_lock: the caller already holds it. The rollback below is a
+    -- restore inside a restore, and the outer lock is seconds old, so without
+    -- this it could never acquire one (LOCK_TIMEOUT is 5 minutes) and every
+    -- failed restore ended in "Restore failed AND rollback failed". Same
+    -- contract as createBackup: whoever acquires the lock releases it.
+    local hold_lock = options.skip_lock == true
+    if not hold_lock then
+        local lock_acquired, lock_err = self:_acquireLock()
+        if not lock_acquired then
+            return { success = false, error = lock_err }
+        end
+    end
+    local function releaseLock()
+        if not hold_lock then
+            self:_releaseLock()
+        end
     end
 
     -- Validate backup first
     local validation = self:validateBackup(backup_path)
     if not validation.valid then
-        self:_releaseLock()
+        releaseLock()
         return {
             success = false,
             error = "Backup validation failed: " .. table.concat(validation.errors, ", "),
@@ -1449,7 +1462,7 @@ function BackupManager:restoreBackup(backup_path, options)
         if not restore_result.success then
             logger.warn("BackupManager: Failed to create restore point: " .. (restore_result.error or "unknown error"))
             -- Don't continue without restore point - too risky
-            self:_releaseLock()
+            releaseLock()
             return {
                 success = false,
                 error = "Failed to create restore point. Aborting restore for safety.",
@@ -1465,7 +1478,7 @@ function BackupManager:restoreBackup(backup_path, options)
 
     if not success then
         self:_removeTempDir(temp_dir)
-        self:_releaseLock()
+        releaseLock()
         return {
             success = false,
             error = err_msg,
@@ -1709,7 +1722,7 @@ function BackupManager:restoreBackup(backup_path, options)
     -- Handle restore result
     if pcall_success and restore_success then
         -- Restore succeeded
-        self:_releaseLock()
+        releaseLock()
         logger.info("BackupManager: Successfully restored backup: " .. backup_path)
 
         return {
@@ -1728,6 +1741,7 @@ function BackupManager:restoreBackup(backup_path, options)
 
             -- Attempt rollback
             local rollback_options = {
+                skip_lock = true,  -- we still hold the lock; the inner call must not wait on it
                 skip_restore_point = true,  -- Don't create another restore point
                 restore_settings = true,
                 restore_api_keys = true,
@@ -1741,7 +1755,7 @@ function BackupManager:restoreBackup(backup_path, options)
 
             if rollback_result.success then
                 logger.info("BackupManager: Successfully rolled back to restore point")
-                self:_releaseLock()
+                releaseLock()
                 return {
                     success = false,
                     error = "Restore failed and was rolled back: " .. restore_error,
@@ -1749,7 +1763,7 @@ function BackupManager:restoreBackup(backup_path, options)
                 }
             else
                 logger.err("BackupManager: Rollback also failed:", rollback_result.error)
-                self:_releaseLock()
+                releaseLock()
                 return {
                     success = false,
                     error = "Restore failed AND rollback failed. Manual recovery may be needed. Original error: " .. restore_error,
@@ -1759,7 +1773,7 @@ function BackupManager:restoreBackup(backup_path, options)
             end
         else
             -- No restore point, just return error
-            self:_releaseLock()
+            releaseLock()
             return {
                 success = false,
                 error = restore_error,
