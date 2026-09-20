@@ -17,12 +17,18 @@ Shapes:
     truncated     200, a JSON object cut mid-key
     html          200, an HTML error page (proxy in front of the model)
     hangup        200 headers, then the connection closed with no body
-    ok            a normal answer, to confirm the stub itself is wired up
+    ok            a normal answer (valid X-Ray JSON, so a ladder round stays clean)
+
+--heal serves ONE empty body and then answers normally for the rest of the run:
+the shape an X-Ray checkpoint chain needs to prove it heals, since the ladder
+retries a failed rung once (after 60s) and that retry must find a real answer.
+--cycle cannot show this -- the retry would land on the next broken shape.
 
 Usage:
     python3 tests/tools/bad_response_stub_server.py                  # port 8766, empty
     python3 tests/tools/bad_response_stub_server.py 8766 null
     python3 tests/tools/bad_response_stub_server.py 8766 --cycle     # a different shape each request
+    python3 tests/tools/bad_response_stub_server.py 8766 --heal      # empty once, then normal answers
 
 Then in KOAssistant (desktop build):
   1. Settings -> Advanced -> Streaming -> Enable Streaming OFF. The crash lives in
@@ -41,19 +47,34 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 SHAPES = ["empty", "headers-only", "whitespace", "null", "scalar",
           "truncated", "html", "hangup", "ok"]
 
+# The "ok" answer is valid X-Ray JSON, not prose. A ladder rung whose answer does
+# not parse is cached AS-IS when the book has no X-Ray yet (koassistant_dialogs.lua,
+# the round-28 ruling: some models produce usable prose), so a prose "ok" writes a
+# junk X-Ray into whatever book the round is run against and every later rung then
+# aborts with "incremental update not applicable". Valid JSON keeps the ladder round
+# on the path it is meant to test, and still reads as a sane answer in a chat.
+OK_CONTENT = json.dumps({
+    "characters": [{"name": "Stub Character",
+                    "description": "Placed by bad_response_stub_server.py. Not a real X-Ray."}],
+    "current_state": {"summary": "The stub is wired up correctly."},
+}, ensure_ascii=False)
+
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 8766
 CYCLE = "--cycle" in sys.argv
+HEAL = "--heal" in sys.argv
 SHAPE = next((a for a in sys.argv[1:] if a in SHAPES), "empty")
 _next = 0
 
 
 def pick_shape():
     global _next
+    _next += 1
+    if HEAL:
+        # One failure, then a provider that works: the retry must succeed.
+        return "empty" if _next == 1 else "ok"
     if not CYCLE:
         return SHAPE
-    shape = SHAPES[_next % len(SHAPES)]
-    _next += 1
-    return shape
+    return SHAPES[(_next - 1) % len(SHAPES)]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -86,8 +107,7 @@ class Handler(BaseHTTPRequestHandler):
             "html": b"<html><head><title>502 Bad Gateway</title></head><body>502</body></html>",
             "ok": json.dumps({"id": "stub", "object": "chat.completion", "model": "stub-model",
                               "choices": [{"index": 0,
-                                           "message": {"role": "assistant",
-                                                       "content": "the stub is wired up correctly"},
+                                           "message": {"role": "assistant", "content": OK_CONTENT},
                                            "finish_reason": "stop"}]}).encode(),
         }
         payload = bodies[shape]
@@ -116,5 +136,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"[stub] listening on http://127.0.0.1:{PORT}  "
-          f"{'cycling every shape' if CYCLE else 'shape=' + SHAPE}", flush=True)
+          f"{'empty once then ok' if HEAL else 'cycling every shape' if CYCLE else 'shape=' + SHAPE}",
+          flush=True)
     HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

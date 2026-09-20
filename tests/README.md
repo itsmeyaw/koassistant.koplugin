@@ -271,7 +271,7 @@ The 104 files, with what each one pins:
 - `test_rate_limits.lua` - per-minute admission limits: header capture, pipe marker, session memo, refusal parsing, budget sizing
 - `test_reasoning.lua` - reasoning parameter injection and reasoning-content parsing
 - `test_reply_quote.lua` - the "Add to reply" quote formatting and popup gating
-- `test_response_body_decode.lua` - the non-streaming body guard: an empty, whitespace-only, marker-only or non-table body is named, never handed to a provider transform (#111)
+- `test_response_body_decode.lua` - the non-streaming response pipe: an empty, whitespace-only, marker-only or non-table body is named rather than handed to a provider transform, and one `read()` result is graded off errno so a signal-interrupted read is not mistaken for an empty pipe (#111, B325)
 - `test_response_parser.lua` - per-provider response parsing from mock responses (the Responses-API transformer is covered in `test_openai_responses.lua`)
 - `test_session_chips_registry.lua` - `Constants.resolveSessionChips` auto-injection (a new chip appears, a dismissed one stays gone)
 - `test_setup_wizard.lua` - wizard pure helpers: font install dir, `font_ui_fallbacks` append semantics, completer probes
@@ -632,6 +632,7 @@ crash regression check.
 python3 tests/tools/bad_response_stub_server.py                  # port 8766, empty body
 python3 tests/tools/bad_response_stub_server.py 8766 null        # one named shape
 python3 tests/tools/bad_response_stub_server.py 8766 --cycle     # a different shape each request
+python3 tests/tools/bad_response_stub_server.py 8766 --heal      # empty once, then normal answers
 ```
 
 Desktop KOReader:
@@ -647,6 +648,23 @@ from <provider>. Please try again."; `null`, `scalar`, `truncated` and `html` sa
 to parse response from <provider>"; `ok` answers normally. No crash in any of them. With
 Console Debug on the plugin log names the empty case with its buffer length. `headers-only`
 is the subtle one: the body is empty only AFTER the rate-limit marker line is stripped.
+
+The checkpoint chain's retry is a SEPARATE round: the `empty_response` class only reaches
+`XrayAuto.classifyStopReason` from the unattended ladder ([main.lua](../main.lua), the
+ladder step's failure branch), never from a chat. Open an EPUB pointed at the stub and
+build X-Ray checkpoints:
+
+- `--heal` (empty once, then real answers): the first rung fails, the log says "transient
+  failure ( empty_response ) - retrying in 60 s", and the retry commits the rung and the
+  chain carries on. This is the case `--cycle` cannot show, since the retry would land on
+  the next broken shape.
+- default `empty` (every request empty): the rung fails, retries once after 60 s, fails
+  again and the chain stops. The Resume row then reads "stopped: empty reply".
+
+Both take a minute of waiting per retry, which is the real retry delay, not a test artifact.
+The `ok` answer is valid X-Ray JSON so the rungs it commits are real ones and the chain
+walks its whole length; it still leaves a "Stub Character" X-Ray on the book, so run the
+ladder round against a throwaway EPUB, or delete the X-Ray afterwards.
 
 ## Per-minute admission limits (no credentials needed)
 
